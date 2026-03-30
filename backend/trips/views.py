@@ -448,7 +448,7 @@ class GeocodeView(APIView):
         url = 'https://nominatim.openstreetmap.org/search'
         params = {'q': q, 'format': 'json', 'limit': 5, 'addressdetails': 0,
                   'countrycodes': 'us'}
-        headers = {'User-Agent': 'Spotter-ELD-TripPlanner/1.0'}
+        headers = {'User-Agent': 'Spotter-ELD-TripPlanner/1.0 (contact@spotter.app)'}
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=8)
             resp.raise_for_status()
@@ -461,6 +461,6 @@ class GeocodeView(APIView):
                 }
                 for r in results
             ])
-        except Exception as exc:
-            return Response({'error': str(exc)},
-                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception:
+            # Autocomplete is best-effort — return empty on any failure
+            return Response([])
