@@ -14,11 +14,46 @@ logger = logging.getLogger(__name__)
 
 # ── Geocoding ──────────────────────────────────────────────────────────────────
 
+def _photon_display_name(props: dict) -> str:
+    """Build a readable display name from Photon GeoJSON properties."""
+    parts = [props.get('name') or props.get('city') or '']
+    for key in ('city', 'state', 'country'):
+        val = props.get(key, '')
+        if val and val not in parts:
+            parts.append(val)
+    return ', '.join(p for p in parts if p)
+
+
 def geocode_address(address: str) -> dict:
     """
-    Geocode an address using Nominatim (OpenStreetMap).
+    Geocode an address using Photon (Komoot) — no API key, no IP restrictions.
+    Falls back to Nominatim if Photon fails.
     Returns {'lat': float, 'lon': float, 'display_name': str}
     """
+    # ── Primary: Photon ───────────────────────────────────────────────────────
+    try:
+        url = 'https://photon.komoot.io/api/'
+        params = {'q': address, 'limit': 1, 'lang': 'en'}
+        headers = {'User-Agent': 'Spotter-ELD-TripPlanner/1.0 (contact@spotter.app)'}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        features = resp.json().get('features', [])
+        # Filter to US results
+        us_features = [f for f in features
+                       if f.get('properties', {}).get('countrycode', '').upper() == 'US']
+        hits = us_features or features
+        if hits:
+            f = hits[0]
+            lon, lat = f['geometry']['coordinates']
+            return {
+                'lat':          float(lat),
+                'lon':          float(lon),
+                'display_name': _photon_display_name(f.get('properties', {})) or address,
+            }
+    except Exception as exc:
+        logger.warning('Photon geocoding failed, trying Nominatim: %s', exc)
+
+    # ── Fallback: Nominatim ───────────────────────────────────────────────────
     url = 'https://nominatim.openstreetmap.org/search'
     params = {'q': address, 'format': 'json', 'limit': 1, 'addressdetails': 0,
               'countrycodes': 'us'}
@@ -436,8 +471,8 @@ class HealthCheckView(APIView):
 class GeocodeView(APIView):
     """
     GET /api/geocode/?q=<address>
-    Proxy to Nominatim to avoid browser CORS issues with the OSM endpoint.
-    Returns top 5 suggestions for autocomplete.
+    Autocomplete proxy using Photon (Komoot) — no IP restrictions, no API key.
+    Returns top 5 US suggestions.
     """
 
     def get(self, request):
@@ -445,22 +480,28 @@ class GeocodeView(APIView):
         if len(q) < 3:
             return Response([])
 
-        url = 'https://nominatim.openstreetmap.org/search'
-        params = {'q': q, 'format': 'json', 'limit': 5, 'addressdetails': 0,
-                  'countrycodes': 'us'}
-        headers = {'User-Agent': 'Spotter-ELD-TripPlanner/1.0 (contact@spotter.app)'}
         try:
+            url = 'https://photon.komoot.io/api/'
+            params = {'q': q, 'limit': 10, 'lang': 'en'}
+            headers = {'User-Agent': 'Spotter-ELD-TripPlanner/1.0 (contact@spotter.app)'}
             resp = requests.get(url, params=params, headers=headers, timeout=8)
             resp.raise_for_status()
-            results = resp.json()
-            return Response([
-                {
-                    'display_name': r['display_name'],
-                    'lat': float(r['lat']),
-                    'lon': float(r['lon']),
-                }
-                for r in results
-            ])
+            features = resp.json().get('features', [])
+            # Keep only US results, return up to 5
+            results = []
+            for f in features:
+                props = f.get('properties', {})
+                if props.get('countrycode', '').upper() != 'US':
+                    continue
+                lon, lat = f['geometry']['coordinates']
+                results.append({
+                    'display_name': _photon_display_name(props) or q,
+                    'lat': float(lat),
+                    'lon': float(lon),
+                })
+                if len(results) == 5:
+                    break
+            return Response(results)
         except Exception:
             # Autocomplete is best-effort — return empty on any failure
             return Response([])
